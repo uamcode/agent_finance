@@ -1,0 +1,15 @@
+fastapi
+finance-datareader==0.9.96
+ipython==7.34.0
+langchain==0.3.27
+langchain-core
+langchain-naver==0.1.0
+langchain-community==0.3.27
+langgraph==0.6.2
+numpy
+pydantic==2.11.7
+pandas
+typing-extensions==4.14.1
+uvicorn[standard]
+yfinance==0.2.65
+yahooquery==2.4.1
