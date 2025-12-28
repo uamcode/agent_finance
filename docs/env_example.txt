@@ -1,0 +1,26 @@
+# API Keys
+# ClovaX API 키 (네이버 클로바 스튜디오)
+CLOVASTUDIO_API_KEY=your_clova_key_here
+
+# OpenAI API 키 (GPT 모델 사용)
+OPENAI_API_KEY=your_openai_key_here
+
+# Tavily API 키 (웹 검색 기능, 선택사항)
+TAVILY_API_KEY=your_tavily_key_here
+
+# LangSmith 설정 (선택사항 - 에이전트 추적 및 모니터링)
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=your_langsmith_key_here
+LANGCHAIN_PROJECT=Naver-Stock-Agent
+
+# 데이터베이스 경로 (선택사항)
+# DB_PATH=stock_db.db
+
+# RAG 설정 (선택사항)
+# PDF_PATH=../RAG_document_ver7.pdf
+# CHROMA_DB_PATH=./chroma_db
+
+# 사용 방법: 이 파일을 .env로 복사하고 실제 API 키를 입력하세요
+# Windows: copy env_example.txt .env
+# Linux/Mac: cp env_example.txt .env
+

@@ -13,3 +13,11 @@ typing-extensions==4.14.1
 uvicorn[standard]
 yfinance==0.2.65
 yahooquery==2.4.1
+streamlit>=1.31.0
+langchain-openai
+langchain-tavily
+chromadb
+pypdf
+langchain-text-splitters
+plotly
+python-dotenv
