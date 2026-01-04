@@ -1,4 +1,5 @@
 fastapi
+langserve[all]
 finance-datareader==0.9.96
 ipython==7.34.0
 langchain==0.3.27

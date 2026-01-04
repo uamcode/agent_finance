@@ -80,13 +80,13 @@ st.markdown("""
 def load_agent():
     """에이전트를 로드합니다 (캐싱)"""
     try:
-        from src.agent import agent, model_name, RAG_AVAILABLE
-        return agent, model_name, RAG_AVAILABLE
+        from src.agent import agent, model_name, RAG_AVAILABLE, create_initial_state
+        return agent, model_name, RAG_AVAILABLE, create_initial_state
     except Exception as e:
         st.error(f"에이전트 로드 실패: {e}")
         import traceback
         st.error(traceback.format_exc())
-        return None, None, False
+        return None, None, False, None
 
 
 def initialize_session_state():
@@ -171,7 +171,7 @@ def display_sidebar():
         st.markdown("---")
         
         # 모델 정보
-        agent, model_name, rag_available = load_agent()
+        agent, model_name, rag_available, create_initial_state = load_agent()
         if agent:
             st.success("에이전트 로드 완료")
             st.info(f"**모델**: {model_name}")
@@ -251,7 +251,7 @@ def main():
     st.markdown('<div class="sub-header">한국 주식 데이터를 자연어로 조회하세요</div>', unsafe_allow_html=True)
     
     # 에이전트 로드
-    agent, model_name, rag_available = load_agent()
+    agent, model_name, rag_available, create_initial_state = load_agent()
     
     if not agent:
         st.error("에이전트를 로드할 수 없습니다. .env 파일과 API 키를 확인하세요.")
@@ -273,12 +273,9 @@ def main():
                 try:
                     st.write("질문 분석 중...")
                     
-                    # 에이전트 실행
-                    response = agent.invoke({
-                        "messages": [
-                            {"role": "user", "content": user_input}
-                        ]
-                    })
+                    # 에이전트 실행 (State 초기화 사용)
+                    initial_state = create_initial_state(user_input)
+                    response = agent.invoke(initial_state)
                     
                     st.write("답변 생성 완료")
                     

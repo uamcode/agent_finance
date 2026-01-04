@@ -14,6 +14,9 @@ from dotenv import load_dotenv
 from typing import Sequence, Annotated, Literal, Optional, Any, Dict, List
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
+from .errors import classify_error, ErrorSeverity, AgentError
+from .logger import logger
+import time
 from langchain_openai import ChatOpenAI
 from langchain_naver import ChatClovaX
 from langchain_core.tools import Tool, tool, InjectedToolCallId
@@ -27,6 +30,41 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, InjectedState, create_react_agent
 from langgraph.types import Command
+
+# AgentState 정의
+class AgentState(TypedDict):
+    """
+    멀티 에이전트 시스템의 공유 상태
+    
+    모든 에이전트는 이 상태를 읽고 업데이트합니다.
+    """
+    # 핵심 메시지
+    messages: Sequence[BaseMessage]
+    
+    # SQL 관련
+    sql_query: Optional[str]  # 생성된 SQL 쿼리
+    query_results: Optional[str]  # DB 실행 결과
+    tables_used: List[str]  # 사용된 테이블 목록
+    
+    # RAG 관련
+    rag_context: Optional[str]  # RAG로 검색된 컨텍스트
+    rag_used: bool  # RAG 사용 여부
+    
+    # 재시도 및 에러
+    retry_count: int  # 현재 재시도 횟수
+    max_retries: int  # 최대 재시도 횟수
+    error_history: List[Dict[str, Any]]  # 에러 히스토리
+    last_error: Optional[Dict[str, Any]]  # 마지막 에러
+    
+    # 실행 메타데이터
+    session_id: Optional[str]  # 세션 ID
+    start_time: Optional[str]  # 시작 시간
+    agent_trace: List[str]  # 실행된 에이전트 목록
+    routing_decision: Optional[str]  # 라우팅 결정 (SQL/RAG)
+    
+    # 사용자 요청
+    original_query: str  # 원본 사용자 질문
+    interpreted_query: Optional[str]  # 해석된 질문
 
 # 환경변수 로드
 load_dotenv()
@@ -48,11 +86,27 @@ db = set_db(db_path)
 
 # SQLDatabaseToolkit 생성
 # 기본 모델 설정 (OpenAI가 있으면 OpenAI, 없으면 ClovaX)
+# 타임아웃 및 재시도 설정 추가
+MAX_RETRIES = 3  # 전역 상수
+
 if api_key_openai:
-    default_model = ChatOpenAI(model='gpt-5-nano', api_key=api_key_openai, temperature=0)
+    default_model = ChatOpenAI(
+        model='gpt-5-nano', 
+        api_key=api_key_openai, 
+        temperature=0,
+        timeout=30,  # 30초 타임아웃
+        max_retries=2  # LLM 자체 재시도
+    )
     model_name = 'openai:gpt-5-nano'
 elif api_key_clova:
-    default_model = ChatClovaX(model='HCX-005', api_key=api_key_clova, max_tokens=4096, temperature=0, top_k=3)
+    default_model = ChatClovaX(
+        model='HCX-005', 
+        api_key=api_key_clova, 
+        max_tokens=4096, 
+        temperature=0, 
+        top_k=3,
+        timeout=30  # 30초 타임아웃
+    )
     model_name = 'HCX-005'
 else:
     raise RuntimeError("사용 가능한 LLM API 키가 없습니다.")
@@ -73,34 +127,139 @@ def db_query_tool(query: str) -> str:
     Returns an error message if the query is incorrect.
     If an error is returned, rewrite the query, check, and retry.
     """
-    # 쿼리 실행
+    logger.info(f"Executing SQL query", extra={"query": query[:100]})
+    
+    # SQL 검증
+    is_valid, error_msg = validate_sql_query(query)
+    if not is_valid:
+        logger.error(
+            "SQL validation failed",
+            extra={"query": query, "error": error_msg}
+        )
+        return f'Error: {error_msg}. Please rewrite your query and try again'
+    
+    start_time = time.time()
     result = db.run_no_throw(query)
+    duration_ms = int((time.time() - start_time) * 1000)
+    
+    # 사용된 테이블 추출
+    tables_used = extract_tables_from_query(query)
 
     # 1) 쿼리 실패 (Error 문자열 반환)
     if isinstance(result, str) and result.startswith("Error:"):
+        logger.error(
+            "SQL query failed",
+            extra={
+                "query": query,
+                "duration_ms": duration_ms,
+                "tables_used": tables_used
+            }
+        )
         return 'Error: Query failed. Please rewrite your query and try again'
 
     # 2) 실행은 성공했지만 결과가 빈 경우
     if (isinstance(result, list) and len(result) == 0) or result in ("[]", ""):
+        logger.info(
+            "SQL query returned no results",
+            extra={
+                "query": query,
+                "duration_ms": duration_ms,
+                "tables_used": tables_used
+            }
+        )
         return "Answer: No rows found for the given query."
 
     # 3) 정상 결과
+    result_size = len(str(result))
+    logger.info(
+        "SQL query succeeded",
+        extra={
+            "query": query,
+            "duration_ms": duration_ms,
+            "result_size_bytes": result_size,
+            "tables_used": tables_used
+        }
+    )
+    
     return result
 
 
-# 오류 처리 함수
-def handle_tool_error(state) -> dict:
-    """에러 정보를 도구 메시지로 반환"""
+# 오류 처리 함수 (개선)
+def handle_tool_error(state: AgentState) -> dict:
+    """
+    개선된 에러 핸들러: 재시도 횟수 제한 + 에러 분류
+    """
     error = state.get('error')
-    tool_calls = state['messages'][-1].tool_calls
+    retry_count = state.get('retry_count', 0)
+    max_retries = state.get('max_retries', MAX_RETRIES)
+    
+    # 에러 분류
+    agent_name = "unknown"
+    if state.get('messages') and len(state['messages']) > 0:
+        last_msg = state['messages'][-1]
+        if hasattr(last_msg, 'name') and last_msg.name:
+            agent_name = last_msg.name
+    
+    classified_error = classify_error(error, agent_name)
+    
+    # 에러 로깅
+    logger.error(
+        f"Tool error in {agent_name}",
+        extra={
+            "agent_name": agent_name,
+            "error_type": classified_error.error_type,
+            "severity": classified_error.severity,
+            "retry_count": retry_count,
+            "max_retries": max_retries
+        }
+    )
+    
+    # 재시도 가능 여부 판단
+    if retry_count >= max_retries:
+        # 최대 재시도 초과
+        return {
+            'messages': [
+                AIMessage(
+                    content=f"죄송합니다. 여러 번 시도했지만 작업을 완료할 수 없습니다.\n\n"
+                            f"오류 유형: {classified_error.error_type}\n"
+                            f"오류 메시지: {classified_error.message}\n\n"
+                            f"다른 방식으로 질문해 주시겠어요?"
+                )
+            ]
+        }
+    
+    # 심각도에 따른 처리
+    if classified_error.severity == ErrorSeverity.CRITICAL:
+        # 즉시 중단
+        return {
+            'messages': [
+                AIMessage(
+                    content=f"시스템 오류가 발생했습니다: {classified_error.message}\n"
+                            f"관리자에게 문의해주세요."
+                )
+            ]
+        }
+    
+    # 재시도
+    tool_calls = []
+    if state.get('messages') and len(state['messages']) > 0:
+        last_msg = state['messages'][-1]
+        if hasattr(last_msg, 'tool_calls'):
+            tool_calls = last_msg.tool_calls
+    
     return {
         'messages': [
             ToolMessage(
-                content=f'Here is error: {repr(error)}\n\nPlease fix your mistake',
+                content=f'오류가 발생했습니다 (재시도 {retry_count + 1}/{max_retries}):\n'
+                        f'{classified_error.message}\n\n'
+                        f'다른 방법으로 시도해주세요.',
                 tool_call_id=tc['id'],
             )
             for tc in tool_calls
-        ]
+        ],
+        'retry_count': retry_count + 1,
+        'error_history': state.get('error_history', []) + [classified_error.dict()],
+        'last_error': classified_error.dict()
     }
 
 
@@ -113,7 +272,7 @@ def create_tool_node_with_fallback(tools: list) -> RunnableWithFallbacks[Any, di
 
 # 쿼리 체크 도구
 @tool
-def model_check_query(state: MessagesState) -> dict:
+def model_check_query(state: AgentState) -> dict:
     """
     Use this tool to check that your SQL query is correct before you run it.
     The query is taken from the last message in the state.
@@ -147,10 +306,138 @@ Do not execute the query yourself. Return only the corrected query."""
     return {"messages": [result]}
 
 
-# 최종 상태를 나타내는 도구 설명
+# ============================================================
+# Structured Output Models
+# ============================================================
+
+class SQLQueryOutput(BaseModel):
+    """SQL 쿼리 생성 결과"""
+    query: str = Field(description="생성된 SELECT 쿼리")
+    tables_used: List[str] = Field(
+        default_factory=list,
+        description="쿼리에 사용된 테이블 목록"
+    )
+    estimated_rows: Optional[int] = Field(
+        None, 
+        description="예상 결과 행 수 (LIMIT 값 또는 예측)"
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="쿼리 정확도 신뢰도 (0-1)"
+    )
+    explanation: Optional[str] = Field(
+        None,
+        description="쿼리 설명 (선택사항)"
+    )
+
+
+class QueryInterpretation(BaseModel):
+    """쿼리 해석 결과"""
+    action: Literal["pass_through", "rewrite", "need_user_input"] = Field(
+        description="처리 액션"
+    )
+    processed_query: str = Field(
+        description="처리된 쿼리 (rewrite된 경우 새 쿼리, 아니면 원본)"
+    )
+    missing_info: Optional[List[str]] = Field(
+        None,
+        description="부족한 정보 목록 (need_user_input인 경우)"
+    )
+    clarification_question: Optional[str] = Field(
+        None,
+        description="사용자에게 물어볼 질문"
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="해석 신뢰도"
+    )
+
+
+class FinalAnswerOutput(BaseModel):
+    """최종 답변 출력"""
+    final_answer: str = Field(
+        ..., 
+        description="사용자에게 전달할 최종 답변 (한국어)"
+    )
+    answer_type: Literal["single", "list", "table", "error", "clarification"] = Field(
+        default="single",
+        description="답변 유형"
+    )
+    data_points: int = Field(
+        default=0,
+        description="사용된 데이터 포인트 수"
+    )
+    sources: Optional[List[str]] = Field(
+        None,
+        description="데이터 출처 (테이블명 또는 RAG 문서)"
+    )
+    confidence: float = Field(
+        default=1.0,
+        description="답변 신뢰도"
+    )
+    follow_up_suggestions: Optional[List[str]] = Field(
+        None,
+        description="후속 질문 제안"
+    )
+
+
+# 하위 호환성을 위한 레거시 클래스 (도구로 사용)
 class SubmitFinalAnswer(BaseModel):
     """쿼리 결과를 기반으로 사용자에게 최종 답변 제출"""
     final_answer: str = Field(..., description="The final answer to the user")
+
+
+# ============================================================
+# Validation Functions
+# ============================================================
+
+def validate_sql_query(query: str) -> tuple[bool, Optional[str]]:
+    """
+    SQL 쿼리 검증
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    query_upper = query.strip().upper()
+    
+    # 기본 검증
+    if not query_upper.startswith("SELECT"):
+        return False, "Query must start with SELECT"
+    
+    # 위험한 키워드 차단
+    dangerous_keywords = ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "EXEC"]
+    for keyword in dangerous_keywords:
+        if keyword in query_upper:
+            logger.error(f"Dangerous SQL keyword detected: {keyword}")
+            return False, f"Dangerous keyword not allowed: {keyword}"
+    
+    # LIMIT 확인 (성능)
+    if "LIMIT" not in query_upper:
+        logger.warning("SQL query without LIMIT clause (performance concern)")
+        # 경고만 하고 통과
+    
+    # 기본 SQL 문법 체크
+    if query_upper.count("(") != query_upper.count(")"):
+        return False, "Unbalanced parentheses"
+    
+    return True, None
+
+
+def extract_tables_from_query(query: str) -> List[str]:
+    """SQL 쿼리에서 테이블명 추출"""
+    import re
+    
+    # FROM 절에서 테이블 추출
+    tables = []
+    from_pattern = r'FROM\s+(\w+)'
+    join_pattern = r'JOIN\s+(\w+)'
+    
+    tables.extend(re.findall(from_pattern, query, re.IGNORECASE))
+    tables.extend(re.findall(join_pattern, query, re.IGNORECASE))
+    
+    return list(set(tables))
 
 
 # RAG 시스템 설정 (rag_setup.py에서 import)
@@ -158,8 +445,9 @@ try:
     from .rag_setup import get_retriever_tool
     retriever_tool = get_retriever_tool()
     RAG_AVAILABLE = True
+    logger.info("RAG 시스템이 성공적으로 로드되었습니다.")
 except ImportError:
-    print("⚠️ RAG 모듈을 찾을 수 없습니다. RAG 기능 없이 실행됩니다.")
+    logger.warning("⚠️ RAG 모듈을 찾을 수 없습니다. RAG 기능 없이 실행됩니다.")
     retriever_tool = None
     RAG_AVAILABLE = False
 
@@ -199,22 +487,27 @@ Few-shot Examples:
 Example 1 - Single stock latest price:
 User: "삼성전자의 최근 종가를 알려줘"
 Query: SELECT Stock_Name, date, close FROM Stock_Prices WHERE Stock_Name = '삼성전자' ORDER BY date DESC LIMIT 1;
+Tables: ['Stock_Prices']
 
 Example 2 - Top N by volume:
 User: "거래량이 많은 상위 10개 종목은?"
 Query: SELECT Stock_Name, SUM(volume) as total_volume FROM Stock_Prices GROUP BY Stock_Name ORDER BY total_volume DESC LIMIT 10;
+Tables: ['Stock_Prices']
 
 Example 3 - Price filter on specific date:
 User: "2024-12-27 종가가 10만원 이상인 종목"
 Query: SELECT Stock_Name, close FROM Stock_Prices WHERE date = '2024-12-27' AND close >= 100000 ORDER BY close DESC LIMIT 15;
+Tables: ['Stock_Prices']
 
 Example 4 - Multiple stocks comparison:
 User: "삼성전자와 SK하이닉스의 최근 종가 비교"
 Query: SELECT Stock_Name, date, close FROM Stock_Prices WHERE Stock_Name IN ('삼성전자', 'SK하이닉스') ORDER BY date DESC, Stock_Name LIMIT 2;
+Tables: ['Stock_Prices']
 
 Example 5 - Date range query:
 User: "삼성전자의 2024-12-01부터 2024-12-27까지 종가"
 Query: SELECT date, close FROM Stock_Prices WHERE Stock_Name = '삼성전자' AND date BETWEEN '2024-12-01' AND '2024-12-27' ORDER BY date;
+Tables: ['Stock_Prices']
 
 Rules:
 1. Always produce a valid SQLite SELECT query
@@ -224,6 +517,11 @@ Rules:
 5. For aggregations, always use GROUP BY
 6. Do NOT use SELECT * - specify columns
 7. Output ONLY the SQL query, nothing else
+
+Quality Guidelines:
+- Confidence: Rate query accuracy 0-1 (1 = certain, 0.5 = uncertain)
+- Safety: Never use DELETE, UPDATE, DROP, INSERT
+- Performance: Always include LIMIT clause
 """
 
 query_execute_prompt = """
@@ -319,6 +617,7 @@ Rules:
 - Do not wrap your output in JSON or any structured object.
 - Output must be a single line of plain text starting with one of:
   "pass_through:", "rewrite:", or "need_user_input:".
+- Rate your confidence: 1.0 (certain), 0.8 (likely), 0.5 (unsure)
 '''
 
 
@@ -389,7 +688,7 @@ def create_handoff_tool(*, agent_name: str, description: str | None = None):
 
     @tool(name, description=description)
     def handoff_tool(
-        state: Annotated[MessagesState, InjectedState],
+        state: Annotated[AgentState, InjectedState],
         tool_call_id: Annotated[str, InjectedToolCallId],
     ) -> Command:
         tool_message = {
@@ -479,7 +778,7 @@ supervisor_agent = create_react_agent(
 # Multi-Agent Graph 구성
 # ============================================================
 
-def route_from_schema(state: MessagesState) -> str:
+def route_from_schema(state: AgentState) -> str:
     """Schema agent의 출력을 보고 RAG vs SQL_gen으로 분기"""
     last_msg = state["messages"][-1].content
     if "ROUTE: RAG_agent" in last_msg and RAG_AVAILABLE:
@@ -487,7 +786,7 @@ def route_from_schema(state: MessagesState) -> str:
     return "SQL_gen_agent"
 
 
-def route_from_interpreter(state: MessagesState) -> str:
+def route_from_interpreter(state: AgentState) -> str:
     """Query Interpreter의 출력을 보고 분기"""
     last_msg = state["messages"][-1].content.lower()
     if last_msg.startswith("need_user_input:"):
@@ -496,7 +795,7 @@ def route_from_interpreter(state: MessagesState) -> str:
         return "supervisor"
 
 
-def should_check_query(state: MessagesState) -> str:
+def should_check_query(state: AgentState) -> str:
     """
     쿼리 복잡도를 분석하여 검증 필요 여부 결정
     간단한 쿼리는 검증을 스킵하여 속도 향상
@@ -545,8 +844,8 @@ def should_check_query(state: MessagesState) -> str:
     return "SQL_check_agent"
 
 
-# StateGraph 생성
-graph_builder = StateGraph(MessagesState)
+# StateGraph 생성 (AgentState 사용)
+graph_builder = StateGraph(AgentState)
 
 # 노드 추가
 graph_builder.add_node(supervisor_agent)
@@ -599,7 +898,98 @@ graph_builder.add_edge("SQL_execute_agent", "supervisor")
 graph_builder.add_edge("Final_answer_agent", END)
 
 # 컴파일
-agent = graph_builder.compile()
+_compiled_agent = graph_builder.compile()
+
+
+# 로깅이 추가된 에이전트 래퍼
+def create_logged_agent(compiled_graph):
+    """로깅이 추가된 에이전트 래퍼"""
+    
+    original_invoke = compiled_graph.invoke
+    
+    def logged_invoke(input_data, config=None):
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        
+        logger.info(
+            "=== Agent session started ===",
+            extra={
+                "session_id": session_id,
+                "input": str(input_data.get("messages", []))[:200]
+            }
+        )
+        
+        start_time = time.time()
+        
+        try:
+            result = original_invoke(input_data, config)
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            logger.info(
+                "=== Agent session completed ===",
+                extra={
+                    "session_id": session_id,
+                    "duration_ms": duration_ms,
+                    "success": True,
+                    "message_count": len(result.get("messages", []))
+                }
+            )
+            
+            return result
+            
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            logger.error(
+                "=== Agent session failed ===",
+                extra={
+                    "session_id": session_id,
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": type(e).__name__
+                },
+                exc_info=True
+            )
+            
+            raise
+    
+    # 원본 메서드 유지하면서 invoke만 래핑
+    compiled_graph.invoke = logged_invoke
+    return compiled_graph
+
+
+agent = create_logged_agent(_compiled_agent)
+
+
+# State 초기화 헬퍼 함수
+def create_initial_state(user_query: str) -> AgentState:
+    """
+    AgentState를 초기화하여 반환
+    
+    Args:
+        user_query: 사용자의 질문
+        
+    Returns:
+        초기화된 AgentState
+    """
+    return {
+        "messages": [HumanMessage(content=user_query)],
+        "sql_query": None,
+        "query_results": None,
+        "tables_used": [],
+        "rag_context": None,
+        "rag_used": False,
+        "retry_count": 0,
+        "max_retries": MAX_RETRIES,
+        "error_history": [],
+        "last_error": None,
+        "session_id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "start_time": datetime.now().isoformat(),
+        "agent_trace": [],
+        "routing_decision": None,
+        "original_query": user_query,
+        "interpreted_query": None
+    }
+
 
 # 그래프 시각화 함수 (선택사항)
 def visualize_agent_graph():
@@ -608,19 +998,19 @@ def visualize_agent_graph():
         from IPython.display import display, Image
         display(Image(agent.get_graph().draw_mermaid_png()))
     except Exception as e:
-        print(f"⚠️ 그래프 시각화 실패: {e}")
+        logger.warning(f"⚠️ 그래프 시각화 실패: {e}")
 
 
 if __name__ == "__main__":
     # 테스트 실행
-    print("✅ 멀티 에이전트 시스템이 성공적으로 로드되었습니다.")
-    print(f"📊 사용 모델: {model_name}")
-    print(f"🗄️ DB 경로: {db_path}")
-    print(f"📚 RAG 사용 가능: {RAG_AVAILABLE}")
+    logger.info("✅ 멀티 에이전트 시스템이 성공적으로 로드되었습니다.")
+    logger.info(f"📊 사용 모델: {model_name}")
+    logger.info(f"🗄️ DB 경로: {db_path}")
+    logger.info(f"📚 RAG 사용 가능: {RAG_AVAILABLE}")
     
     # 간단한 테스트
     test_query = "삼성전자의 최근 종가를 알려줘"
-    print(f"\n🧪 테스트 쿼리: {test_query}")
+    logger.info(f"🧪 테스트 쿼리: {test_query}")
     
     try:
         result = agent.invoke({
@@ -628,9 +1018,9 @@ if __name__ == "__main__":
                 {"role": "user", "content": test_query}
             ]
         })
-        print("\n✅ 테스트 성공!")
+        logger.info("✅ 테스트 성공!")
         if result and "messages" in result:
             last_message = result["messages"][-1]
-            print(f"📝 최종 답변: {last_message.content if hasattr(last_message, 'content') else last_message}")
+            logger.info(f"📝 최종 답변: {last_message.content if hasattr(last_message, 'content') else last_message}")
     except Exception as e:
-        print(f"\n❌ 테스트 실패: {e}")
+        logger.error(f"❌ 테스트 실패: {e}", exc_info=True)

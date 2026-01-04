@@ -36,16 +36,26 @@ LangGraph 기반 멀티 에이전트 시스템으로 한국 주식(KOSPI/KOSDAQ)
 
 ```
 Agent-yj/
-├── main.py              # 메인 실행 파일 (Streamlit 런처)
+├── main.py              # FastAPI + LangServe API 서버
+├── run_streamlit.py     # Streamlit 실행 스크립트
 ├── streamlit_app.py     # Streamlit 웹 앱
-├── api_server.py        # FastAPI 서버 (API 용도)
+├── api_server.py        # FastAPI 서버 (구버전, 백업용)
 ├── README.md            # 프로젝트 문서
 ├── requirements.txt     # 패키지 의존성
+├── 고도화계획.md        # 시스템 개선 계획서
 │
 ├── src/                 # 소스 코드
 │   ├── agent.py         # 멀티 에이전트 시스템
 │   ├── db.py            # 데이터베이스 생성/관리
-│   └── rag_setup.py     # RAG 벡터스토어 설정
+│   ├── rag_setup.py     # RAG 벡터스토어 설정
+│   ├── errors.py        # 에러 타입 정의
+│   └── logger.py        # 로깅 시스템
+│
+├── scripts/             # 유틸리티 스크립트
+│   └── analyze_logs.py  # 로그 분석 도구
+│
+├── logs/                # 로그 파일 (자동 생성)
+│   └── agent_YYYYMMDD.log
 │
 ├── data/                # 데이터 저장소
 │   ├── stock_db.db      # 주식 데이터 SQLite DB
@@ -151,29 +161,32 @@ python -m src.rag_setup
 
 ## 🚀 실행 방법
 
-### 기본 실행 (권장 ⭐)
+### 방법 1: Streamlit UI (권장 ⭐)
+
+```bash
+python run_streamlit.py
+```
+
+브라우저가 자동으로 열리며 Streamlit 웹 앱이 시작됩니다!
+- 접속: `http://localhost:8501`
+
+또는 직접 실행:
+```bash
+streamlit run streamlit_app.py
+```
+
+### 방법 2: FastAPI + LangServe API
 
 ```bash
 python main.py
 ```
 
-브라우저가 자동으로 열리며 Streamlit 웹 앱이 시작됩니다!
-
-### 또는 Streamlit 직접 실행
-
-```bash
-streamlit run streamlit_app.py
-```
-
-브라우저: `http://localhost:8501`
-
-### FastAPI 서버 (API 용도)
-
-```bash
-python api_server.py
-```
-
-API 문서: `http://localhost:8000/docs`
+LangServe 기반 API 서버가 시작됩니다:
+- API 문서: `http://localhost:8000/docs`
+- **Playground**: `http://localhost:8000/agent/playground` ⭐ (웹에서 바로 테스트)
+- Invoke: `POST /agent/invoke`
+- Stream: `POST /agent/stream` (스트리밍 응답)
+- Batch: `POST /agent/batch` (배치 처리)
 
 ### 에이전트 직접 테스트
 
@@ -200,28 +213,54 @@ python main.py
 
 ## 💬 사용 예시
 
-### Streamlit UI
-1. 웹 브라우저에서 앱 열기
+### 1. Streamlit UI
+1. 웹 브라우저에서 앱 열기 (`python run_streamlit.py`)
 2. 하단 입력창에 질문 입력:
    - "삼성전자의 최근 종가를 알려줘"
    - "거래량이 많은 상위 10개 종목은?"
    - "RSI가 30 이하인 종목을 찾아줘"
    - "골든크로스가 뭐야?" (RAG 시스템이 설명)
 
-### FastAPI (curl)
-```bash
-curl "http://localhost:8000/agent?question=삼성전자의%20최근%20종가는?"
+### 2. LangServe Playground (권장 ⭐)
+1. API 서버 시작: `python main.py`
+2. 브라우저에서 `http://localhost:8000/agent/playground` 접속
+3. 웹 UI에서 바로 테스트 가능!
+
+### 3. LangServe Client (Python)
+```python
+from langserve import RemoteRunnable
+
+# API 연결
+agent_api = RemoteRunnable("http://localhost:8000/agent")
+
+# Invoke (동기)
+result = agent_api.invoke({
+    "messages": [
+        {"role": "user", "content": "삼성전자 최근 종가는?"}
+    ]
+})
+print(result)
+
+# Stream (스트리밍)
+for chunk in agent_api.stream({
+    "messages": [
+        {"role": "user", "content": "거래량 상위 10개 종목은?"}
+    ]
+}):
+    print(chunk)
 ```
 
-### Python 코드
+### 4. 직접 에이전트 호출
 ```python
-from src.agent import agent
-from langchain.schema import HumanMessage
+from src.agent import agent, create_initial_state
 
-response = agent.invoke({
-    "messages": [HumanMessage(content="삼성전자의 최근 종가는?")]
-})
+# State 초기화
+initial_state = create_initial_state("삼성전자의 최근 종가는?")
 
+# 에이전트 실행
+response = agent.invoke(initial_state)
+
+# 결과 출력
 print(response["messages"][-1].content)
 ```
 
@@ -333,19 +372,28 @@ pip install -r requirements.txt
 - **Backend**: Python 3.8+
 - **LLM Framework**: LangChain, LangGraph
 - **UI**: Streamlit
-- **API**: FastAPI
+- **API**: FastAPI, LangServe
 - **DB**: SQLite
 - **Vector DB**: ChromaDB
 - **Monitoring**: LangSmith
+- **Logging**: 구조화된 JSON 로깅
 
 ### 주요 의존성
 - `langchain==0.3.27`
 - `langgraph==0.6.2`
+- `langserve[all]` (신규 추가)
 - `streamlit>=1.31.0`
 - `fastapi`
 - `chromadb`
 - `langchain-openai`
 - `langchain-naver==0.1.0`
+
+### v2.1 주요 개선사항 (2026-01-04)
+- ✅ **에러 핸들링 강화**: 재시도 로직 + 에러 분류
+- ✅ **로깅 시스템**: 구조화된 JSON 로깅 + 분석 도구
+- ✅ **State 관리**: 명시적 AgentState 정의
+- ✅ **LangServe 도입**: Playground + 스트리밍 지원
+- ✅ **코드 분리**: main.py (API) + run_streamlit.py (UI)
 
 ## 📄 라이선스
 
@@ -364,5 +412,6 @@ This project is for educational purposes.
 ---
 
 **버전 히스토리:**
+- v2.1.0 (2026-01-04): 에러 핸들링 + 로깅 + LangServe + State 관리 강화
 - v2.0.0 (2025-01): 멀티 에이전트 + RAG + LangSmith 통합
 - v1.0.0 (2024-12): 초기 단일 에이전트 버전
