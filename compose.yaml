@@ -1,0 +1,20 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    volumes:
+      # DB 파일 유지 (컨테이너 재시작 시 데이터 보존)
+      - ./data:/app/data
+      # 로그 파일 유지
+      - ./logs:/app/logs
+    environment:
+      # .env 파일 자동 로드
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - CLOVASTUDIO_API_KEY=${CLOVASTUDIO_API_KEY}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT}
+    restart: unless-stopped

@@ -20,7 +20,7 @@ def analyze_logs(log_file):
             except:
                 continue
     
-    print(f"📊 로그 분석 결과: {log_file.name}")
+    print(f"로그 분석 결과: {log_file.name}")
     print(f"총 로그 수: {len(logs)}")
     print()
     

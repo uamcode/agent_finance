@@ -121,40 +121,41 @@ def db_query_tool(query: str) -> str:
 
 
 @tool
-def model_check_query(state: dict) -> dict:
+def validate_sql_syntax(query: str) -> str:
     """
-    Use this tool to check that your SQL query is correct before you run it.
-    The query is taken from the last message in the state.
+    Validate SQL query syntax and check for common mistakes.
+    Returns the validated query or suggestions for fixes.
+    
+    Args:
+        query: SQL query string to validate
+        
+    Returns:
+        Validation result with the query or error messages
     """
-    from langchain_core.prompts import ChatPromptTemplate
-    from ..config import default_model
+    # 기본 검증
+    is_valid, error_msg = validate_sql_query(query)
     
-    query_check_system = """You are a SQL expert with a strong attention to detail.
-Double check the SQLite query for common mistakes, including:
-- Using NOT IN with NULL values
-- Using UNION when UNION ALL should have been used
-- Using BETWEEN for exclusive ranges
-- Data type mismatch in predicates
-- Properly quoting identifiers
-- Using the correct number of arguments for functions
-- Casting to the correct data type
-- Using the proper columns for joins
-
-If there are any of the above mistakes, rewrite the query.
-If there are no mistakes, just reproduce the original query.
-
-Do not execute the query yourself. Return only the corrected query."""
-
-    query_check_prompt = ChatPromptTemplate.from_messages(
-        [('system', query_check_system), ('placeholder', '{messages}')]
-    )
+    if not is_valid:
+        return f"SQL Validation Error: {error_msg}\n\nPlease fix the query and try again."
     
-    # db_query_tool은 같은 모듈에 이미 정의되어 있으므로 직접 참조
-    query_check = query_check_prompt | default_model.bind_tools(
-        [db_query_tool], tool_choice='db_query_tool'
-    )
+    # 일반적인 실수 체크
+    warnings = []
+    query_upper = query.upper()
     
-    last_msg = state["messages"][-1]
-    result = query_check.invoke({"messages": [last_msg]})
-    return {"messages": [result]}
+    # NOT IN with potential NULL issues
+    if "NOT IN" in query_upper:
+        warnings.append("⚠️ NOT IN may have issues with NULL values. Consider using NOT EXISTS instead.")
+    
+    # Missing LIMIT
+    if "LIMIT" not in query_upper:
+        warnings.append("⚠️ Query without LIMIT clause may return too many results.")
+    
+    # UNION vs UNION ALL
+    if "UNION" in query_upper and "UNION ALL" not in query_upper:
+        warnings.append("💡 Consider UNION ALL if duplicates are acceptable (faster).")
+    
+    if warnings:
+        return f"✅ Query is valid but has suggestions:\n" + "\n".join(warnings) + f"\n\nQuery: {query}"
+    else:
+        return f"✅ Query validation passed!\n\nQuery: {query}"
 

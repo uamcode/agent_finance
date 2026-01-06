@@ -52,7 +52,7 @@ def load_pdf_documents(pdf_path: str = DEFAULT_PDF_PATH) -> list:
     for path in possible_paths:
         if Path(path).exists():
             pdf_file = str(path)
-            print(f"✅ PDF 파일 발견: {pdf_file}")
+            print(f"[OK] PDF 파일 발견: {pdf_file}")
             break
     
     if not pdf_file:
@@ -73,7 +73,7 @@ def load_pdf_documents(pdf_path: str = DEFAULT_PDF_PATH) -> list:
     # 문서 로드 및 분할
     split_docs = loader.load_and_split(text_splitter)
     
-    print(f"📄 총 {len(split_docs)}개의 문서 청크가 생성되었습니다.")
+    print(f"[INFO] 총 {len(split_docs)}개의 문서 청크가 생성되었습니다.")
     
     return split_docs
 
@@ -97,6 +97,12 @@ def create_vectorstore(documents: list, persist_directory: str = CHROMA_DB_PATH)
             "RAG 기능을 사용하려면 .env 파일에 OpenAI API 키를 추가하세요."
         )
     
+    # persist_directory의 상위 폴더가 없으면 생성
+    persist_path = Path(persist_directory)
+    if not persist_path.parent.exists():
+        persist_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] 디렉토리를 생성했습니다: {persist_path.parent}")
+    
     # 임베딩 모델 생성
     embeddings = OpenAIEmbeddings(api_key=openai_api_key)
     
@@ -107,7 +113,7 @@ def create_vectorstore(documents: list, persist_directory: str = CHROMA_DB_PATH)
         persist_directory=persist_directory
     )
     
-    print(f"🗄️ 벡터스토어가 {persist_directory}에 생성되었습니다.")
+    print(f"[INFO] 벡터스토어가 {persist_directory}에 생성되었습니다.")
     
     return vectorstore
 
@@ -135,10 +141,10 @@ def load_existing_vectorstore(persist_directory: str = CHROMA_DB_PATH) -> Option
             persist_directory=persist_directory,
             embedding_function=embeddings
         )
-        print(f"✅ 기존 벡터스토어를 로드했습니다: {persist_directory}")
+        print(f"[OK] 기존 벡터스토어를 로드했습니다: {persist_directory}")
         return vectorstore
     except Exception as e:
-        print(f"⚠️ 기존 벡터스토어 로드 실패: {e}")
+        print(f"[WARNING] 기존 벡터스토어 로드 실패: {e}")
         return None
 
 
@@ -159,16 +165,22 @@ def get_retriever_tool(force_rebuild: bool = False):
     
     # 벡터스토어가 없으면 새로 생성
     if vectorstore is None:
-        print("📚 새로운 벡터스토어를 구축합니다...")
+        print("[INFO] 새로운 벡터스토어를 구축합니다...")
         try:
             documents = load_pdf_documents()
             vectorstore = create_vectorstore(documents)
         except FileNotFoundError as e:
-            print(f"⚠️ {e}")
-            print("⚠️ RAG 기능 없이 계속 진행합니다.")
+            print(f"[WARNING] {e}")
+            print("[WARNING] RAG 기능 없이 계속 진행합니다.")
             return None
         except RuntimeError as e:
-            print(f"⚠️ {e}")
+            print(f"[WARNING] {e}")
+            return None
+        except Exception as e:
+            print(f"[WARNING] 벡터스토어 생성 중 예기치 않은 오류 발생: {e}")
+            print("[WARNING] RAG 기능 없이 계속 진행합니다.")
+            import traceback
+            print(f"상세 오류:\n{traceback.format_exc()}")
             return None
     
     # Retriever 생성
@@ -181,20 +193,20 @@ def get_retriever_tool(force_rebuild: bool = False):
         description='Use this tool to search information from PDF document about technical analysis indicators and stock trading terms'
     )
     
-    print("✅ Retriever tool이 성공적으로 생성되었습니다.")
+    print("[OK] Retriever tool이 성공적으로 생성되었습니다.")
     
     return retriever_tool
 
 
 def rebuild_vectorstore():
     """벡터스토어를 강제로 재구축합니다."""
-    print("🔄 벡터스토어를 재구축합니다...")
+    print("[INFO] 벡터스토어를 재구축합니다...")
     
     # 기존 벡터스토어 삭제
     import shutil
     if Path(CHROMA_DB_PATH).exists():
         shutil.rmtree(CHROMA_DB_PATH)
-        print(f"🗑️ 기존 벡터스토어를 삭제했습니다: {CHROMA_DB_PATH}")
+        print(f"[INFO] 기존 벡터스토어를 삭제했습니다: {CHROMA_DB_PATH}")
     
     # 새로 구축
     return get_retriever_tool(force_rebuild=True)
@@ -217,11 +229,11 @@ if __name__ == "__main__":
         
         if retriever_tool:
             print("\n" + "=" * 60)
-            print("✅ RAG 시스템이 성공적으로 구축되었습니다!")
+            print("[OK] RAG 시스템이 성공적으로 구축되었습니다!")
             print("=" * 60)
             
             # 테스트 검색
-            print("\n🧪 테스트 검색을 수행합니다...")
+            print("\n[TEST] 테스트 검색을 수행합니다...")
             test_query = "RSI가 뭐야?"
             result = retriever_tool.invoke(test_query)
             print(f"\n검색 결과 (상위 {min(3, len(result))}개):")
@@ -229,10 +241,10 @@ if __name__ == "__main__":
                 print(f"\n[문서 {i}]")
                 print(doc[:200] + "..." if len(doc) > 200 else doc)
         else:
-            print("\n⚠️ RAG 시스템 구축에 실패했습니다.")
+            print("\n[WARNING] RAG 시스템 구축에 실패했습니다.")
             
     except Exception as e:
-        print(f"\n❌ 오류 발생: {e}")
+        print(f"\n[ERROR] 오류 발생: {e}")
         import traceback
         traceback.print_exc()
 

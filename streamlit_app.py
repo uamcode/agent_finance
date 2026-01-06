@@ -23,7 +23,7 @@ load_dotenv()
 # 페이지 설정
 st.set_page_config(
     page_title="한국 주식 AI 에이전트",
-    page_icon="📈",
+    page_icon=":chart_with_upwards_trend:",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -87,6 +87,42 @@ def load_agent():
         import traceback
         st.error(traceback.format_exc())
         return None, None, False, None
+
+
+def create_state_with_history(user_input: str, create_initial_state_func) -> dict:
+    """
+    이전 대화 히스토리를 포함한 state 생성
+    
+    Args:
+        user_input: 새로운 사용자 입력
+        create_initial_state_func: 기본 state 생성 함수
+        
+    Returns:
+        대화 히스토리가 포함된 AgentState
+    """
+    from langchain_core.messages import HumanMessage, AIMessage
+    
+    # 1. 기본 state 생성
+    initial_state = create_initial_state_func(user_input)
+    
+    # 2. 이전 대화가 있으면 히스토리 추가
+    if st.session_state.messages:
+        history_messages = []
+        
+        # UI 메시지를 LangChain 메시지로 변환
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                history_messages.append(HumanMessage(content=msg["content"]))
+            else:
+                history_messages.append(AIMessage(content=msg["content"]))
+        
+        # 새 질문 추가
+        history_messages.append(HumanMessage(content=user_input))
+        
+        # messages 덮어쓰기 (히스토리 포함)
+        initial_state["messages"] = history_messages
+    
+    return initial_state
 
 
 def initialize_session_state():
@@ -205,8 +241,17 @@ def display_sidebar():
         
         st.markdown("---")
         
+        # 대화 히스토리 상태
+        st.markdown("### 💬 대화 상태")
+        message_count = len(st.session_state.messages)
+        if message_count > 0:
+            st.success(f"대화 히스토리: {message_count}개 메시지")
+            st.info("💡 이전 대화 맥락이 유지됩니다")
+        else:
+            st.info("새로운 대화를 시작하세요")
+        
         # 대화 히스토리 초기화
-        if st.button("대화 초기화", use_container_width=True):
+        if st.button("🔄 대화 초기화", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
         
@@ -273,8 +318,8 @@ def main():
                 try:
                     st.write("질문 분석 중...")
                     
-                    # 에이전트 실행 (State 초기화 사용)
-                    initial_state = create_initial_state(user_input)
+                    # 에이전트 실행 (대화 히스토리 포함)
+                    initial_state = create_state_with_history(user_input, create_initial_state)
                     response = agent.invoke(initial_state)
                     
                     st.write("답변 생성 완료")

@@ -1,7 +1,5 @@
 """
-Pydantic 모델 정의
-
-Structured Output을 위한 Pydantic 모델들을 정의합니다.
+Pydantic 모델 정의- Structured Output을 위한 Pydantic 모델들을 정의합니다.
 """
 
 from typing import Literal, Optional, List

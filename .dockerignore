@@ -1,0 +1,28 @@
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# env file
+.env
+
+# DB 파일
+data/
+
+# documents 
+*.hwpx
+*.hwp
+*.png
+*.md
+docs/old_code/
+
+# 디버깅 도구 - 개발용 필요없음  
+scripts/ 
+logs/
+
+# 기타 
+.git/
+.gitignore
+.vscode/
+

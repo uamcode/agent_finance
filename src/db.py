@@ -22,18 +22,24 @@ def make_db(market: str="", date1: str="",date2:str="",db_path=None):
         parent_dir = os.path.dirname(current_dir)  # Agent-yj 폴더
         db_path = os.path.join(parent_dir, 'data', 'stock_db.db')
     
+    # db_path의 디렉토리가 없으면 생성
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+        print(f"[INFO] 디렉토리를 생성했습니다: {db_dir}")
+    
     # 기본 날짜 설정
     if not date1:
         date1 = '2024-01-01'
     if not date2:
         date2 = datetime.today().strftime('%Y-%m-%d')
     
-    print(f"📅 데이터 조회 기간: {date1} ~ {date2}")
+    print(f"[INFO] 데이터 조회 기간: {date1} ~ {date2}")
     
     # 기존 DB 파일이 있으면 삭제
     if os.path.exists(db_path):
         os.remove(db_path)
-        print(f"✅ 기존 DB 파일을 삭제했습니다: {db_path}")
+        print(f"[INFO] 기존 DB 파일을 삭제했습니다: {db_path}")
     
     # Finance datareader를 통해 ticker 정보 추출 
     kr_stocks = fdr.StockListing('KRX')

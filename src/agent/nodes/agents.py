@@ -7,6 +7,7 @@ create_react_agent를 사용하여 각 에이전트를 생성합니다.
 from langgraph.prebuilt import create_react_agent
 from ..config import (
     model_name,
+    sql_gen_model,
     list_tables_tool,
     get_schema_tool,
     retriever_tool,
@@ -21,7 +22,7 @@ from ..prompts import (
     rag_prompt,
     query_interpreter_prompt,
 )
-from ..tools import model_check_query, db_query_tool
+from ..tools import validate_sql_syntax, db_query_tool
 
 
 # SQL Schema Agent
@@ -32,9 +33,9 @@ sql_schema_agent = create_react_agent(
     name='SQL_schema_agent'
 )
 
-# SQL Gen Agent
+# SQL Gen Agent (고성능 모델 사용)
 sql_gen_agent = create_react_agent(
-    model=model_name,
+    model=sql_gen_model,
     tools=[],
     prompt=query_gen_prompt,
     name='SQL_gen_agent'
@@ -43,7 +44,7 @@ sql_gen_agent = create_react_agent(
 # SQL Check Agent
 sql_check_agent = create_react_agent(
     model=model_name,
-    tools=[model_check_query],
+    tools=[validate_sql_syntax],
     prompt=query_execute_prompt,
     name='SQL_check_agent'
 )
@@ -87,16 +88,20 @@ query_interpreter = create_react_agent(
 def create_supervisor_agent(supervisor_tools):
     """Supervisor 에이전트를 생성합니다."""
     supervisor_prompt = (
-        "You are a supervisor managing some agents:\n"
-        "a SQL_gen_agent. Assign when generate SQL query to this agent.\n"
-        "a SQL_schema_agent. Assign this agent before generate SQL query.\n"
-        "a SQL_execute_agent. Assign to execute sql query to this agent.\n"
-        "a SQL_check_agent. Assign to check generated query works well to this agent.\n"
-        "a Final_answer_agent. Assign to make final answer to this agent.\n"
-        "Assign work to one agent at a time, do not call agents in parallel.\n"
-        "SQL_gen_agent가 쿼리를 생성하면, 반드시 SQL_check_agent를 거쳐 검증해야 한다.\n"
-        "SQL_execute_agent는 SQL_check_agent에서 검증된 쿼리만 실행한다.\n"
-        "Do not do any work yourself"
+        "You are a supervisor managing a multi-agent workflow.\n\n"
+        "Available agents:\n"
+        "- SQL_schema_agent: Use this to START a new SQL query workflow. "
+        "This agent will check database schema and then automatically proceed through "
+        "SQL generation → validation → execution.\n"
+        "- Final_answer_agent: Use this to provide the final answer to the user "
+        "after SQL execution is complete.\n\n"
+        "Rules:\n"
+        "1. For NEW queries: assign to SQL_schema_agent first\n"
+        "2. After SQL execution completes: assign to Final_answer_agent\n"
+        "3. Assign work to ONE agent at a time\n"
+        "4. Do NOT do any work yourself\n\n"
+        "The SQL workflow (schema → gen → check → execute) runs automatically.\n"
+        "You only need to START it and provide FINAL answer."
     )
     
     return create_react_agent(

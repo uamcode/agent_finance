@@ -4,11 +4,13 @@ Handoff 도구
 에이전트 간 작업 전환을 위한 도구들을 정의합니다.
 """
 
-from typing import Annotated
-from langchain_core.tools import tool, InjectedToolCallId
-from langgraph.prebuilt import InjectedState
-from langgraph.types import Command
-from ..state import AgentState
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel
+
+
+class EmptyInput(BaseModel):
+    """빈 입력 스키마 - handoff tool은 입력 매개변수가 없음"""
+    pass
 
 
 def create_handoff_tool(*, agent_name: str, description: str | None = None):
@@ -25,23 +27,19 @@ def create_handoff_tool(*, agent_name: str, description: str | None = None):
     name = f"transfer_to_{agent_name}"
     description = description or f"Ask {agent_name} for help"
 
-    @tool(name, description=description)
-    def handoff_tool(
-        state: Annotated[AgentState, InjectedState],
-        tool_call_id: Annotated[str, InjectedToolCallId],
-    ) -> Command:
-        tool_message = {
-            'role': 'tool',
-            'content': f'Successfully transferred to {agent_name}',
-            'name': name,
-            'tool_call_id': tool_call_id,
-        }
-        return Command(
-            goto=agent_name,
-            update={**state, "messages": state['messages'] + [tool_message]},
-            graph=Command.PARENT,
-        )
-    return handoff_tool
+    def handoff_func() -> str:
+        """
+        에이전트로 전환합니다.
+        실제 전환 로직은 graph의 노드에서 처리됩니다.
+        """
+        return f"Transferring to {agent_name}..."
+    
+    return StructuredTool(
+        name=name,
+        description=description,
+        func=handoff_func,
+        args_schema=EmptyInput
+    )
 
 
 

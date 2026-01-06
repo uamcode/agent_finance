@@ -41,6 +41,15 @@ if api_key_openai:
         max_retries=2
     )
     model_name = 'openai:gpt-5-nano'
+    
+    # SQL Gen Agent 전용 모델 (고성능)
+    sql_gen_model = ChatOpenAI(
+        model='gpt-5-mini',
+        api_key=api_key_openai,
+        temperature=0,
+        timeout=30,
+        max_retries=2
+    )
 elif api_key_clova:
     default_model = ChatClovaX(
         model='HCX-005', 
@@ -51,6 +60,7 @@ elif api_key_clova:
         timeout=30
     )
     model_name = 'HCX-005'
+    sql_gen_model = default_model  # Clova 사용시 동일 모델
 else:
     raise RuntimeError("사용 가능한 LLM API 키가 없습니다.")
 
@@ -71,10 +81,18 @@ get_schema_tool = next(tool for tool in sql_tools if tool.name == "sql_db_schema
 try:
     from ..rag_setup import get_retriever_tool
     retriever_tool = get_retriever_tool()
-    RAG_AVAILABLE = True
-    logger.info("RAG 시스템이 성공적으로 로드되었습니다.")
+    RAG_AVAILABLE = retriever_tool is not None
+    if RAG_AVAILABLE:
+        logger.info("RAG 시스템이 성공적으로 로드되었습니다.")
+    else:
+        logger.warning("RAG 시스템 로드 실패. RAG 기능 없이 실행됩니다.")
 except ImportError:
     logger.warning("RAG 모듈을 찾을 수 없습니다. RAG 기능 없이 실행됩니다.")
+    retriever_tool = None
+    RAG_AVAILABLE = False
+except Exception as e:
+    logger.error(f"RAG 시스템 초기화 중 오류 발생: {e}")
+    logger.warning("RAG 기능 없이 계속 진행합니다.")
     retriever_tool = None
     RAG_AVAILABLE = False
 
